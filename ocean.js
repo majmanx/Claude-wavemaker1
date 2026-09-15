@@ -1,19 +1,19 @@
 // Wavemaker 海浪引擎。零采样，纯 Web Audio。被 index.html 和 analyze.html 共用。
 (function (global) {
   const PRESETS = {
-    dawn:      { swell: .3, period: 12, breakForce: .35, wash: .5, distance: .3, wind: .1, gulls: .15, material: 'sand' },
-    afternoon: { swell: .6, period: 9,  breakForce: .6,  wash: .65, distance: .2, wind: .25, gulls: .4, material: 'sand' },
-    brighton:  { swell: .55, period: 8, breakForce: .7,  wash: .7, distance: .15, wind: .35, gulls: .3, material: 'pebble' },
-    storm:     { swell: .95, period: 6, breakForce: .95, wash: .5, distance: .1, wind: .8, gulls: .05, material: 'rock' },
-    far:       { swell: .7, period: 11, breakForce: .5,  wash: .3, distance: .85, wind: .3, gulls: .2, material: 'sand' },
+    dawn:      { swell: .3, period: 12, breakForce: .35, wash: .5, distance: .3, wind: .1, gulls: .15, material: 'sand',   space: .25, ambience: .3 },
+    afternoon: { swell: .6, period: 9,  breakForce: .6,  wash: .65, distance: .2, wind: .25, gulls: .4, material: 'sand',   space: .25, ambience: .35 },
+    brighton:  { swell: .55, period: 8, breakForce: .7,  wash: .7, distance: .15, wind: .35, gulls: .3, material: 'pebble', space: .35, ambience: .3 },
+    storm:     { swell: .95, period: 6, breakForce: .95, wash: .5, distance: .1, wind: .8, gulls: .05, material: 'rock',   space: .55, ambience: .5 },
+    far:       { swell: .7, period: 11, breakForce: .5,  wash: .3, distance: .85, wind: .3, gulls: .2, material: 'sand',   space: .4, ambience: .6 },
   };
 
   // 材质决定每一层的滤波器落点。这是"这片海是哪片海"的主要来源。
   // 频率都比第一版低了很多：真实海浪的能量集中在 100 到 1000 Hz，高频只是点缀。
   const MATERIAL = {
-    sand:   { swellLP: 550, roarLP: 1100, washHP: 450, washLP: 3800, foam: 1.0, rattle: 0,   thump: 0.08 },
-    pebble: { swellLP: 500, roarLP: 1400, washHP: 650, washLP: 5000, foam: 0.6, rattle: 0.5, thump: 0.25 },
-    rock:   { swellLP: 450, roarLP: 900,  washHP: 400, washLP: 3000, foam: 0.8, rattle: 0,   thump: 0.8 },
+    sand:   { swellLP: 550, roarLP: 1100, washHP: 450, washLP: 3800, foam: 1.0, rattle: 0,   thump: 0.08, echo: 0,    cascade: 0 },
+    pebble: { swellLP: 500, roarLP: 1300, washHP: 600, washLP: 4500, foam: 0.5, rattle: 1,   thump: 0.15, echo: 0,    cascade: 0 },
+    rock:   { swellLP: 450, roarLP: 900,  washHP: 400, washLP: 3000, foam: 0.8, rattle: 0,   thump: 0.8,  echo: 0.35, cascade: 1 },
   };
 
   function hashSeed(str) {
@@ -71,6 +71,21 @@
 
   function distanceCutoff(d) { return 12000 * Math.pow(0.1, d); }
 
+  // 合成一个开阔海岸的混响脉冲响应：立体声、指数衰减的噪声，高频衰减得更快
+  function shoreIR(ctx, rng, seconds = 1.8) {
+    const sr = ctx.sampleRate, len = Math.floor(sr * seconds), ir = ctx.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const d = ir.getChannelData(c); let lp = 0;
+      for (let i = 0; i < len; i++) {
+        const t = i / sr, env = Math.exp(-t * 3.2) * (i < 400 ? i / 400 : 1);
+        const a = Math.min(0.98, 0.3 + t * 0.4);                 // 随时间越来越暗
+        lp = lp * a + (rng() * 2 - 1) * (1 - a);
+        d[i] = lp * env;
+      }
+    }
+    return ir;
+  }
+
   function buildScene(ctx, p, onEvent) {
     const rng = mulberry32(hashSeed(p.seed));
     const master = ctx.createGain(); master.gain.value = 1.0;
@@ -80,17 +95,36 @@
     const analyser = ctx.createAnalyser(); analyser.fftSize = 1024;
     master.connect(tone).connect(comp).connect(analyser).connect(ctx.destination);
 
+    // 空间：近处的层送一部分进混响；礁石再加一个崖壁的短回声
+    const near = ctx.createGain(); near.connect(master);
+    const send = ctx.createGain(); send.gain.value = 0;
+    const verb = ctx.createConvolver(); verb.buffer = shoreIR(ctx, rng);
+    const wet = ctx.createGain(); wet.gain.value = 0;
+    near.connect(send).connect(verb).connect(wet).connect(master);
+    const echo = ctx.createDelay(1); echo.delayTime.value = 0.17;
+    const echoGain = ctx.createGain(); echoGain.gain.value = 0;
+    const echoLP = ctx.createBiquadFilter(); echoLP.type = 'lowpass'; echoLP.frequency.value = 1800;
+    near.connect(echo).connect(echoLP).connect(echoGain).connect(verb);
+    function updateSpace(t) {
+      const sp = p.space ?? 0.3, m = MATERIAL[p.material];
+      send.gain.setTargetAtTime(0.9, t, 0.1);
+      wet.gain.setTargetAtTime(0.55 * sp, t, 0.3);
+      echoGain.gain.setTargetAtTime(m.echo * sp, t, 0.3);
+    }
+
     const L = {
-      bedL:   layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 260 }, { type: 'highpass', freq: 100 }], -0.75),
-      bedR:   layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 260 }, { type: 'highpass', freq: 100 }],  0.75),
+      bedL:   layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 200 }, { type: 'highpass', freq: 100 }], -0.75),
+      bedR:   layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 200 }, { type: 'highpass', freq: 100 }],  0.75),
       swell:  layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 550, Q: 0.8 }, { type: 'highpass', freq: 160 }]),
-      roar:   layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 1100, Q: 0.9 }, { type: 'highpass', freq: 140 }]),   // 拍岸的主体
-      crash:  layer(ctx, rng, master, 'white', [{ type: 'bandpass', freq: 2200, Q: 0.8 }]),                                      // 拍岸顶上一点点飞溅
-      thump:  layer(ctx, rng, master, 'brown', [{ type: 'lowpass', freq: 90 }]),
-      wash:   layer(ctx, rng, master, 'pink',  [{ type: 'highpass', freq: 450 }, { type: 'lowpass', freq: 3800 }]),
-      foam:   layer(ctx, rng, master, 'white', [{ type: 'highpass', freq: 3500 }, { type: 'lowpass', freq: 10000 }]),
-      rattle: layer(ctx, rng, master, 'white', [{ type: 'bandpass', freq: 2800, Q: 2.5 }]),
+      roar:   layer(ctx, rng, near, 'pink',  [{ type: 'lowpass', freq: 1100, Q: 0.9 }, { type: 'highpass', freq: 140 }]),   // 拍岸的主体
+      crash:  layer(ctx, rng, near, 'white', [{ type: 'bandpass', freq: 2200, Q: 0.8 }]),                                    // 拍岸顶上的飞溅，礁石上还有落回去的水
+      thump:  layer(ctx, rng, near, 'brown', [{ type: 'lowpass', freq: 90 }]),
+      wash:   layer(ctx, rng, near, 'pink',  [{ type: 'highpass', freq: 450 }, { type: 'lowpass', freq: 3800 }]),
+      foam:   layer(ctx, rng, near, 'white', [{ type: 'highpass', freq: 3500 }, { type: 'lowpass', freq: 10000 }]),
+      rattle: layer(ctx, rng, near, 'white', [{ type: 'bandpass', freq: 2500, Q: 7 }]),                                      // 卵石：高 Q，像小石头相碰的"嗒"
+      drain:  layer(ctx, rng, near, 'pink',  [{ type: 'highpass', freq: 2200 }, { type: 'lowpass', freq: 9000 }]),           // 卵石：水从石缝里退下去的细嘶
       wind:   layer(ctx, rng, master, 'pink',  [{ type: 'bandpass', freq: 350, Q: 1.5 }]),
+      leaves: layer(ctx, rng, master, 'white', [{ type: 'bandpass', freq: 3200, Q: 0.9 }]),                                  // 环境：风过草木
     };
 
     const S = { nextWave: 0.5, waveIndex: 0, dir: 1, nextGull: 2 + rng() * 6, nextBed: 0, nextWind: 0, until: 0 };
@@ -98,58 +132,79 @@
     function wave(t, strength, dir) {
       const m = MATERIAL[p.material];
       const s = Math.min(1, Math.max(0.05, strength));
-      const near = 1 - 0.7 * p.distance;
-      const rise = p.period * 0.32 * (0.8 + 0.4 * rng());
+      const nearF = 1 - 0.7 * p.distance;
+      const rise = p.period * 0.42 * (0.8 + 0.4 * rng());        // 比第一版长：从远处慢慢过来
       const tB = t + rise;
 
-      // 涌：低频慢慢涨起来，滤波器随之打开
-      L.swell.gain.setTargetAtTime(0.15 + 0.6 * s, t, rise / 2.5);
-      L.swell.gain.setTargetAtTime(0.06, tB + 0.2, 0.9);
-      L.swell.filters[0].frequency.setTargetAtTime(m.swellLP * (0.6 + 0.8 * s), t, rise / 2);
-      L.swell.filters[0].frequency.setTargetAtTime(m.swellLP * 0.6, tB + 0.5, 1.5);
+      // 涌：一开始又远又糊，越来越近、越来越亮。增益和低通一起打开
+      L.swell.gain.setTargetAtTime(0.06 + 0.15 * s, t, rise * 0.5);
+      L.swell.gain.setTargetAtTime(0.25 + 0.75 * s, t + rise * 0.45, rise * 0.22);
+      L.swell.gain.setTargetAtTime(0.05, tB + 0.7, 1.4);           // 拖过拍岸，不留断档
+      L.swell.filters[0].frequency.setValueAtTime(220, t);
+      L.swell.filters[0].frequency.exponentialRampToValueAtTime(m.swellLP * (1.6 + 1.6 * s) * (m.cascade ? 2.2 : 1), tB);
+      L.swell.filters[0].frequency.setTargetAtTime(300, tB + 0.8, 1.2);
 
-      // 拍岸：中低频的一声"轰"，上面只有一点点飞溅的高频
-      const bf = p.breakForce * (0.5 + 0.6 * s) * near;
-      L.roar.filters[0].frequency.setValueAtTime(m.roarLP * (0.85 + 0.3 * rng()), tB);
-      L.roar.gain.setTargetAtTime(bf * 1.6, tB, 0.08 + 0.25 * (1 - bf));
-      L.roar.gain.setTargetAtTime(0, tB + 0.4 + 0.5 * bf, 0.6 + 1.0 * s);
+      // 拍岸：中低频的"轰"，从拍岸前一点开始起，音色在最初半秒里打开
+      const bf = p.breakForce * (0.5 + 0.6 * s) * nearF;
+      L.roar.filters[0].frequency.setValueAtTime(m.roarLP * 0.5, tB - 0.15);
+      L.roar.filters[0].frequency.exponentialRampToValueAtTime(m.roarLP * (1.2 + 0.8 * s), tB + 0.45);
+      L.roar.filters[0].frequency.setTargetAtTime(m.roarLP * 0.7, tB + 1.2, 1.0);
+      L.roar.gain.setTargetAtTime(bf * 1.15, tB - 0.15, 0.14 + 0.2 * (1 - bf));
+      L.roar.gain.setTargetAtTime(0, tB + 0.5 + 0.5 * bf, 0.7 + 1.0 * s);
       L.roar.panner.pan.setValueAtTime(dir * 0.4, tB);
-      L.crash.gain.setTargetAtTime(bf * 0.08, tB + 0.05, 0.05);
-      L.crash.gain.setTargetAtTime(0, tB + 0.3, 0.4);
+      L.crash.gain.setTargetAtTime(bf * 0.1, tB, 0.06);
+      L.crash.gain.setTargetAtTime(0, tB + 0.35, 0.4);
       L.crash.panner.pan.setValueAtTime(dir * 0.5, tB);
       if (m.thump) {
-        L.thump.gain.setTargetAtTime(m.thump * bf * 1.2, tB, 0.05);
-        L.thump.gain.setTargetAtTime(0, tB + 0.2, 0.4);
+        L.thump.gain.setTargetAtTime(m.thump * bf * 0.9, tB - 0.05, 0.06);
+        L.thump.gain.setTargetAtTime(0, tB + 0.25, m.cascade ? 0.9 : 0.4);
+      }
+      // 礁石：拍上去的水又落回来，一串越来越稀的飞溅
+      if (m.cascade) {
+        const n = 18 + Math.floor(14 * s);
+        for (let i = 0; i < n; i++) {
+          const tt = tB + 0.3 + Math.pow(rng(), 0.7) * (1.6 + 1.2 * s);
+          L.crash.gain.setValueAtTime(bf * 0.07 * (0.3 + 0.7 * rng()) * (1 - (tt - tB) / 3.5), tt);
+          L.crash.gain.setTargetAtTime(0, tt + 0.015, 0.03 + 0.05 * rng());
+        }
       }
 
-      // 冲滩：中频的嘶声沿着海岸线跑；水变薄时稍微变亮，回退时变暗。比第一版低得多、轻得多
-      const w = p.wash * (0.45 + 0.7 * s) * near;
-      const tW = tB + 0.25;
-      const runup = 1.2 + 2.2 * w;
-      L.wash.filters[1].frequency.setValueAtTime(m.washLP, tW);
-      L.wash.gain.setTargetAtTime(0.45 * w, tW, 0.4);
-      L.wash.gain.setTargetAtTime(0, tW + runup, 0.9 + 1.6 * w);
-      L.wash.filters[0].frequency.setValueAtTime(m.washHP * 0.7, tW);
-      L.wash.filters[0].frequency.linearRampToValueAtTime(m.washHP * 1.3, tW + runup);
-      L.wash.filters[0].frequency.setTargetAtTime(m.washHP * 0.6, tW + runup, 1.5);
+      // 冲滩：紧接着拍岸，慢慢涌上来，越推越亮，最响的时候最清澈；回退时变暗
+      const w = p.wash * (0.45 + 0.7 * s) * nearF;
+      const tW = tB + 0.1;
+      const runup = 1.3 + 2.4 * w;
+      L.wash.gain.setTargetAtTime(0.65 * w, tW, 0.55);
+      L.wash.gain.setTargetAtTime(0, tW + runup, 0.7 + 1.1 * w);
+      L.wash.filters[0].frequency.setValueAtTime(m.washHP * 0.6, tW);
+      L.wash.filters[0].frequency.linearRampToValueAtTime(m.washHP * 1.5, tW + runup);
+      L.wash.filters[0].frequency.setTargetAtTime(m.washHP * 0.5, tW + runup, 1.5);
+      L.wash.filters[1].frequency.setValueAtTime(m.washLP * 0.45, tW);
+      L.wash.filters[1].frequency.exponentialRampToValueAtTime(m.washLP * 2.2, tW + runup * 0.8);
+      L.wash.filters[1].frequency.setTargetAtTime(m.washLP * 0.4, tW + runup + 0.3, 1.0);
       L.wash.panner.pan.setValueAtTime(-dir * 0.6, tW);
       L.wash.panner.pan.linearRampToValueAtTime(dir * 0.6, tW + runup + 2);
 
-      // 泡沫：很轻的一层
-      L.foam.gain.setTargetAtTime(0.035 * w * m.foam, tW + 0.3, 0.6);
-      L.foam.gain.setTargetAtTime(0, tW + runup + 0.5, 2.5);
+      // 泡沫：冲到最远处之后留在沙上的细碎声，明亮但轻
+      L.foam.gain.setTargetAtTime(0.045 * w * m.foam, tW + runup * 0.5, 0.7);
+      L.foam.gain.setTargetAtTime(0, tW + runup + 0.3, 1.6);
 
-      // 卵石：回退时一串短促的脉冲
+      // 卵石：不是踩上去，是水轻轻拍上去、再从石缝里退下去。
+      // 一层细嘶（水退）+ 一串很轻、高 Q 的"嗒"（小石头相碰），密度在回退中段最高，都送进混响
       if (m.rattle) {
-        const t0 = tW + runup * 0.5, span = runup + 2;
-        const n = Math.floor(30 + 90 * w);
+        const tR = tW + runup * 0.7, span = runup * 0.8 + 1.5;
+        L.drain.gain.setTargetAtTime(0.09 * w, tR, 0.5);
+        L.drain.gain.setTargetAtTime(0, tR + span * 0.6, 1.2);
+        L.drain.panner.pan.setValueAtTime(dir * 0.3, tR);
+        const n = Math.floor(40 + 120 * w);
         const times = [];
-        for (let i = 0; i < n; i++) times.push(t0 + rng() * span);
+        for (let i = 0; i < n; i++) { const u = rng(); times.push(tR + span * (0.5 - 0.5 * Math.cos(u * Math.PI)) * 0.9 + rng() * 0.1 * span); }
         times.sort((a, b) => a - b);
-        L.rattle.panner.pan.setValueAtTime(dir * 0.4, t0);
         for (const tt of times) {
-          L.rattle.gain.setValueAtTime(m.rattle * w * (0.15 + 0.4 * rng()), tt);
-          L.rattle.gain.setTargetAtTime(0, tt + 0.01, 0.012);
+          const k = 1 - Math.abs((tt - tR) / span - 0.45) * 1.6;           // 中段最密最响
+          L.rattle.filters[0].frequency.setValueAtTime(1200 + 2600 * rng(), tt);
+          L.rattle.panner.pan.setValueAtTime(dir * 0.3 + (rng() - 0.5) * 0.8, tt);
+          L.rattle.gain.setValueAtTime(0.05 * w * Math.max(0.15, k) * (0.4 + 0.6 * rng()), tt);
+          L.rattle.gain.setTargetAtTime(0, tt + 0.004, 0.006 + 0.012 * rng());
         }
       }
       onEvent && onEvent({ kind: 'wave', at: tB, strength: s, dir });
@@ -204,18 +259,21 @@
         S.nextGull += 3 + rng() * 10 * (1.2 - p.gulls);
       }
       while (S.nextBed < to) {
-        const base = (0.05 + 0.15 * p.swell) * (1 - 0.35 * p.distance);
+        const base = (0.05 + 0.15 * p.swell) * (1 - 0.35 * p.distance) * (0.6 + 0.8 * (p.ambience ?? 0.3));
         L.bedL.gain.setTargetAtTime(base * (0.7 + 0.6 * rng()), S.nextBed, 1.5);
         L.bedR.gain.setTargetAtTime(base * (0.7 + 0.6 * rng()), S.nextBed + 0.7, 1.5);
         S.nextBed += 2.5 + rng() * 2;
       }
       while (S.nextWind < to) {
-        const gust = p.wind * (0.4 + rng() * 0.9);
+        const gust = p.wind * (0.4 + rng() * 0.9), amb = p.ambience ?? 0.3;
         L.wind.gain.setTargetAtTime(0.3 * gust, S.nextWind, 1.2 + rng() * 2);
         L.wind.filters[0].frequency.setTargetAtTime(250 + 350 * gust + rng() * 150, S.nextWind, 1.5);
+        L.leaves.gain.setTargetAtTime(0.05 * amb * gust * (0.3 + rng()), S.nextWind + 0.4, 1.0 + rng() * 1.5);
+        L.leaves.panner.pan.setTargetAtTime(rng() * 1.4 - 0.7, S.nextWind, 2);
         S.nextWind += 1.5 + rng() * 4;
       }
       tone.frequency.setTargetAtTime(distanceCutoff(p.distance), from, 0.3);
+      updateSpace(from);
     }
 
     return { ctx, master, analyser, schedule, wave, gull, rng, state: S, layers: L };
