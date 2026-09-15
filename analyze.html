@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wavemaker · 分析</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; color: var(--muted); cursor: pointer; }
+  .drop.over { border-color: var(--accent); color: var(--text); }
+  canvas.bands { height: 220px; margin-top: 10px; }
+  pre.report { font-size: 12px; color: var(--muted); white-space: pre; overflow: auto; margin: 10px 0 0; }
+  .legend { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 10px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<header>
+  <h1>分析 <small>把真实的海拖进来，和引擎的输出放在同一把尺子上</small></h1>
+  <p class="lead">浏览器自己解码，所以 mp4、mov、m4a、mp3、wav、ogg 都行。什么都不上传，全在本地。</p>
+  <nav><a href="index.html">海浪</a><a href="sparkler.html">仙女棒</a><a href="dandelion.html">蒲公英</a><a class="current" href="analyze.html">分析</a></nav>
+</header>
+<main>
+  <section>
+    <h2>A · 真实录音</h2>
+    <div class="drop" id="dropA">拖一个录音或视频到这里，或点击选择<input type="file" id="fileA" accept="audio/*,video/*" hidden></div>
+    <canvas class="bands" id="bandsA" width="900" height="440"></canvas>
+    <div class="legend"><i style="background:#58c4ff"></i>这个文件 <i style="background:#8aa0b6"></i>文献目标</div>
+    <pre class="report" id="reportA">还没有文件。</pre>
+  </section>
+  <section>
+    <h2>B · 引擎输出</h2>
+    <div class="export">
+      <select id="preset"><option value="afternoon">午后沙滩</option><option value="dawn">清晨平静</option><option value="brighton">卵石滩</option><option value="storm">礁石风暴</option><option value="far">远处的海</option></select>
+      <input type="number" id="seconds" min="10" max="180" value="40"><span>秒</span>
+      <button class="primary" id="render">渲染并分析</button>
+    </div>
+    <div class="drop" id="dropB" style="margin-top:10px">或者拖一个导出的 WAV 到这里<input type="file" id="fileB" accept="audio/*,video/*" hidden></div>
+    <canvas class="bands" id="bandsB" width="900" height="440"></canvas>
+    <div class="legend"><i style="background:#ffd166"></i>引擎 <i style="background:#8aa0b6"></i>文献目标 <i style="background:#58c4ff"></i>A 文件（如果有）</div>
+    <pre class="report" id="reportB">还没有分析。</pre>
+  </section>
+</main>
+<script src="ocean.js"></script>
+<script src="analysis.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const { BANDS, TARGET_SURF, analyze, report } = window.Analysis;
+const results = { A: null, B: null };
+
+function drawBands(canvas, series) {
+  const g = canvas.getContext('2d'), W = canvas.width, H = canvas.height;
+  g.fillStyle = '#08111b'; g.fillRect(0, 0, W, H);
+  const top = 6, bottom = -36, pad = 40, plotH = H - 60;
+  const y = db => 20 + (top - Math.max(bottom, Math.min(top, db))) / (top - bottom) * plotH;
+  g.strokeStyle = '#223449'; g.fillStyle = '#8aa0b6'; g.font = '13px system-ui'; g.textAlign = 'right';
+  for (let db = top; db >= bottom; db -= 6) { g.beginPath(); g.moveTo(pad, y(db)); g.lineTo(W - 10, y(db)); g.stroke(); g.fillText(db, pad - 6, y(db) + 4); }
+  const n = BANDS.length, slot = (W - pad - 10) / n;
+  const k = series.length, bw = slot * 0.7 / k;
+  series.forEach((s, si) => {
+    BANDS.forEach((fc, i) => {
+      const x = pad + i * slot + slot * 0.15 + si * bw;
+      g.fillStyle = s.color; g.fillRect(x, y(s.data[fc]), bw - 2, y(bottom) - y(s.data[fc]));
+    });
+  });
+  g.fillStyle = '#8aa0b6'; g.textAlign = 'center';
+  BANDS.forEach((fc, i) => g.fillText(fc >= 1000 ? (fc / 1000) + 'k' : fc, pad + i * slot + slot / 2, H - 14));
+}
+
+function show(which, r, name) {
+  results[which] = r;
+  $('#report' + which).textContent = report(r, name);
+  const series = [{ color: '#8aa0b6', data: TARGET_SURF }];
+  if (which === 'A') series.unshift({ color: '#58c4ff', data: r.bandsDb });
+  else { if (results.A) series.unshift({ color: '#58c4ff', data: results.A.bandsDb }); series.unshift({ color: '#ffd166', data: r.bandsDb }); }
+  drawBands($('#bands' + which), series);
+}
+
+async function decodeFile(file) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = await ctx.decodeAudioData(await file.arrayBuffer());
+  ctx.close();
+  return buf;
+}
+function wireDrop(which) {
+  const drop = $('#drop' + which), input = $('#file' + which);
+  const handle = async file => {
+    if (!file) return;
+    $('#report' + which).textContent = '解码中…';
+    try { show(which, analyze(await decodeFile(file)), file.name); }
+    catch (e) { $('#report' + which).textContent = '解码失败：' + e.message; }
+  };
+  drop.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => handle(input.files[0]));
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); handle(e.dataTransfer.files[0]); });
+}
+wireDrop('A'); wireDrop('B');
+
+$('#render').addEventListener('click', async () => {
+  const btn = $('#render'); btn.disabled = true; btn.textContent = '渲染中…';
+  try {
+    const preset = $('#preset').value, seconds = Math.min(180, Math.max(10, Number($('#seconds').value) || 40));
+    const p = { swell: .6, period: 9, breakForce: .6, wash: .6, distance: .25, wind: .25, gulls: 0, material: 'sand', seed: 'analyze', ...window.Wavemaker.PRESETS[preset], gulls: 0 };
+    const buf = await window.Wavemaker.renderOffline(p, seconds);
+    show('B', analyze(buf), `引擎 · ${preset}`);
+  } catch (e) { $('#reportB').textContent = '失败：' + e.message; }
+  finally { btn.disabled = false; btn.textContent = '渲染并分析'; }
+});
+window.AnalyzePage = { show, results };
+</script>
+</body>
+</html>
