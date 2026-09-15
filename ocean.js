@@ -13,7 +13,7 @@
   const MATERIAL = {
     sand:   { swellLP: 550, roarLP: 1100, washHP: 450, washLP: 3800, foam: 1.0, rattle: 0,   thump: 0.08, echo: 0,    cascade: 0 },
     pebble: { swellLP: 500, roarLP: 1300, washHP: 600, washLP: 4500, foam: 0.5, rattle: 1,   thump: 0.15, echo: 0,    cascade: 0 },
-    rock:   { swellLP: 450, roarLP: 900,  washHP: 400, washLP: 3000, foam: 0.8, rattle: 0,   thump: 0.8,  echo: 0.35, cascade: 1 },
+    rock:   { swellLP: 500, roarLP: 1000, washHP: 400, washLP: 3000, foam: 0.8, rattle: 0,   thump: 0.4,  echo: 0.35, cascade: 1 },
   };
 
   function hashSeed(str) {
@@ -69,6 +69,17 @@
     return { src, gain: gain.gain, panner, filters: fs };
   }
 
+  // 用一条采样好的曲线驱动参数，比几段 setTargetAtTime 拼起来平滑得多
+  function curve(param, t0, dur, fn, from, to) {
+    const n = 48, arr = new Float32Array(n);
+    for (let i = 0; i < n; i++) arr[i] = fn(i / (n - 1));
+    try { param.setValueCurveAtTime(arr, t0, dur); }
+    catch (e) {
+      // 和上一浪的曲线重叠（比如手动拍一浪）：从这一刻起接管，平滑逼近
+      try { param.cancelAndHoldAtTime ? param.cancelAndHoldAtTime(t0) : param.cancelScheduledValues(t0); param.setTargetAtTime(to, t0, dur / 3); } catch (e2) {}
+    }
+  }
+
   function distanceCutoff(d) { return 12000 * Math.pow(0.1, d); }
 
   // 合成一个开阔海岸的混响脉冲响应：立体声、指数衰减的噪声，高频衰减得更快
@@ -97,10 +108,13 @@
 
     // 空间：近处的层送一部分进混响；礁石再加一个崖壁的短回声
     const near = ctx.createGain(); near.connect(master);
+    const far = ctx.createGain(); far.connect(master);
+    const farSend = ctx.createGain(); farSend.gain.value = 0.3;
     const send = ctx.createGain(); send.gain.value = 0;
     const verb = ctx.createConvolver(); verb.buffer = shoreIR(ctx, rng);
     const wet = ctx.createGain(); wet.gain.value = 0;
     near.connect(send).connect(verb).connect(wet).connect(master);
+    far.connect(farSend).connect(verb);
     const echo = ctx.createDelay(1); echo.delayTime.value = 0.17;
     const echoGain = ctx.createGain(); echoGain.gain.value = 0;
     const echoLP = ctx.createBiquadFilter(); echoLP.type = 'lowpass'; echoLP.frequency.value = 1800;
@@ -113,17 +127,17 @@
     }
 
     const L = {
-      bedL:   layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 200 }, { type: 'highpass', freq: 100 }], -0.75),
-      bedR:   layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 200 }, { type: 'highpass', freq: 100 }],  0.75),
-      swell:  layer(ctx, rng, master, 'pink',  [{ type: 'lowpass', freq: 550, Q: 0.8 }, { type: 'highpass', freq: 160 }]),
+      bedL:   layer(ctx, rng, far, 'pink',  [{ type: 'lowpass', freq: 200 }, { type: 'highpass', freq: 100 }], -0.75),
+      bedR:   layer(ctx, rng, far, 'pink',  [{ type: 'lowpass', freq: 200 }, { type: 'highpass', freq: 100 }],  0.75),
+      swell:  layer(ctx, rng, far, 'pink',  [{ type: 'lowpass', freq: 550, Q: 0.8 }, { type: 'highpass', freq: 160 }]),
       roar:   layer(ctx, rng, near, 'pink',  [{ type: 'lowpass', freq: 1100, Q: 0.9 }, { type: 'highpass', freq: 140 }]),   // 拍岸的主体
       crash:  layer(ctx, rng, near, 'white', [{ type: 'bandpass', freq: 2200, Q: 0.8 }]),                                    // 拍岸顶上的飞溅，礁石上还有落回去的水
-      thump:  layer(ctx, rng, near, 'brown', [{ type: 'lowpass', freq: 90 }]),
+      thump:  layer(ctx, rng, near, 'brown', [{ type: 'lowpass', freq: 130 }]),
       wash:   layer(ctx, rng, near, 'pink',  [{ type: 'highpass', freq: 450 }, { type: 'lowpass', freq: 3800 }]),
       foam:   layer(ctx, rng, near, 'white', [{ type: 'highpass', freq: 3500 }, { type: 'lowpass', freq: 10000 }]),
       rattle: layer(ctx, rng, near, 'white', [{ type: 'bandpass', freq: 2500, Q: 7 }]),                                      // 卵石：高 Q，像小石头相碰的"嗒"
       drain:  layer(ctx, rng, near, 'pink',  [{ type: 'highpass', freq: 2200 }, { type: 'lowpass', freq: 9000 }]),           // 卵石：水从石缝里退下去的细嘶
-      wind:   layer(ctx, rng, master, 'pink',  [{ type: 'bandpass', freq: 350, Q: 1.5 }]),
+      wind:   layer(ctx, rng, far, 'pink',  [{ type: 'bandpass', freq: 350, Q: 1.5 }]),
       leaves: layer(ctx, rng, master, 'white', [{ type: 'bandpass', freq: 3200, Q: 0.9 }]),                                  // 环境：风过草木
     };
 
@@ -136,13 +150,12 @@
       const rise = p.period * 0.42 * (0.8 + 0.4 * rng());        // 比第一版长：从远处慢慢过来
       const tB = t + rise;
 
-      // 涌：一开始又远又糊，越来越近、越来越亮。增益和低通一起打开
-      L.swell.gain.setTargetAtTime(0.06 + 0.15 * s, t, rise * 0.5);
-      L.swell.gain.setTargetAtTime(0.25 + 0.75 * s, t + rise * 0.45, rise * 0.22);
+      // 涌：一条从远处一路加速过来的曲线，越来越响，但拍岸之前始终是闷的轰隆，亮度要等拍岸
+      const peak = 0.3 + 0.8 * s, top = m.swellLP * (1.2 + 0.8 * s) * (m.cascade ? 1.3 : 1);
+      curve(L.swell.gain, t, rise, u => 0.05 + (peak - 0.05) * Math.pow(u, 2.4), 0.05, peak);
+      curve(L.swell.filters[0].frequency, t, rise, u => 180 * Math.pow(top / 180, Math.pow(u, 1.6)), 180, top);
       L.swell.gain.setTargetAtTime(0.05, tB + 0.7, 1.4);           // 拖过拍岸，不留断档
-      L.swell.filters[0].frequency.setValueAtTime(220, t);
-      L.swell.filters[0].frequency.exponentialRampToValueAtTime(m.swellLP * (1.6 + 1.6 * s) * (m.cascade ? 2.2 : 1), tB);
-      L.swell.filters[0].frequency.setTargetAtTime(300, tB + 0.8, 1.2);
+      L.swell.filters[0].frequency.setTargetAtTime(250, tB + 0.8, 1.2);
 
       // 拍岸：中低频的"轰"，从拍岸前一点开始起，音色在最初半秒里打开
       const bf = p.breakForce * (0.5 + 0.6 * s) * nearF;
@@ -211,7 +224,7 @@
     }
 
     function gull(t) {
-      const near = 1 - 0.6 * p.distance;
+      const nearF = 1 - 0.6 * p.distance;
       const dist = 0.25 + rng() * 0.75;
       const f0 = 900 + rng() * 500;
       const osc = ctx.createOscillator(); osc.type = 'sawtooth';
@@ -219,13 +232,15 @@
       const vibGain = ctx.createGain(); vibGain.gain.value = f0 * 0.02;
       vib.connect(vibGain).connect(osc.frequency);
       const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 2.5;
-      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 9000 * (1 - dist * 0.7);
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 6500 * (1 - dist * 0.75);
       const g = ctx.createGain(); g.gain.value = 0;
       const pan = ctx.createStereoPanner(); pan.pan.value = rng() * 1.6 - 0.8;
-      osc.connect(bp).connect(lp).connect(g).connect(pan).connect(master);
+      const gullSend = ctx.createGain(); gullSend.gain.value = 0.6 + 0.6 * dist;   // 越远，混响占比越大
+      osc.connect(bp).connect(lp).connect(g).connect(pan);
+      pan.connect(master); pan.connect(gullSend).connect(verb);
       const calls = 1 + Math.floor(rng() * 3);
       let tt = t;
-      const amp = 0.15 * (1 - dist * 0.75) * near;
+      const amp = 0.09 * (1 - dist * 0.8) * nearF;
       for (let i = 0; i < calls; i++) {
         const dur = 0.35 + rng() * 0.3;
         osc.frequency.setValueAtTime(f0 * 0.85, tt);
