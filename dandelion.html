@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wavemaker · 蒲公英</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  canvas#field { height: 420px; cursor: pointer; }
+  main { grid-template-columns: 1fr; }
+  .meter { height: 6px; background: #0d1826; border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .08s; }
+</style>
+</head>
+<body>
+<header>
+  <h1>蒲公英 <small>吹一口气，种子飞走，落地生根 · 生成式的安静</small></h1>
+  <p class="lead">每一颗种子飞出去是一个音，落地是一个音，长成新的一株再等你吹。对着麦克风吹，或者按住"吹"。</p>
+  <nav><a href="index.html">海浪</a><a href="sparkler.html">仙女棒</a><a class="current" href="dandelion.html">蒲公英</a></nav>
+</header>
+<main>
+  <section>
+    <canvas id="field" width="1400" height="600"></canvas>
+    <div class="meter"><i id="blowMeter"></i></div>
+    <div class="buttons">
+      <button class="primary" id="toggle">开始</button>
+      <button class="warm" id="blow">按住：吹</button>
+      <button id="mic">开麦克风</button>
+      <button id="reset">重来</button>
+    </div>
+    <div class="row"><label>风</label><input type="range" id="wind" min="-1" max="1" step="0.01" value="0.3"><output for="wind">0.30</output></div>
+    <div class="row"><label>麦克风灵敏度</label><input type="range" id="sensitivity" min="0" max="1" step="0.01" value="0.5"><output for="sensitivity">0.50</output></div>
+    <div class="row"><label>音量</label><input type="range" id="volume" min="0" max="1" step="0.01" value="0.6"><output for="volume">0.60</output></div>
+    <p class="hint">快捷键：按住 <kbd>空格</kbd> 吹。音高来自五声音阶，所以怎么吹都不会难听。种子落地后大约十秒长成一株新的。</p>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<script>
+const P = { wind: .3, sensitivity: .5, volume: .6 };
+const $ = s => document.querySelector(s);
+const logEl = $('#log');
+function log(msg) { const lines = logEl.textContent.split('\n').filter(Boolean); lines.unshift(msg); logEl.textContent = lines.slice(0, 5).join('\n'); }
+for (const id of ['wind', 'sensitivity', 'volume']) {
+  const el = $('#' + id), out = document.querySelector(`output[for=${id}]`);
+  const show = () => out.textContent = Number(el.value).toFixed(2);
+  el.addEventListener('input', () => { P[id] = Number(el.value); show(); }); show();
+}
+
+// ---------- 声音 ----------
+const PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21];   // 大调五声，两个八度
+const hz = (semi, base = 392) => base * Math.pow(2, semi / 12);   // G4 起
+
+let A = null;   // 音频图
+function buildAudio() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const master = ctx.createGain(); master.gain.value = P.volume;
+  const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 2.5;
+  // 一个带反馈的延迟，给所有音一点"回忆"的尾巴
+  const delay = ctx.createDelay(2); delay.delayTime.value = 0.42;
+  const fb = ctx.createGain(); fb.gain.value = 0.38;
+  const dlp = ctx.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 2400;
+  const wet = ctx.createGain(); wet.gain.value = 0.35;
+  master.connect(comp).connect(ctx.destination);
+  master.connect(delay).connect(dlp).connect(fb).connect(delay);
+  dlp.connect(wet).connect(comp);
+
+  const noise = (() => { const len = ctx.sampleRate * 3, buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0); for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1; return buf; })();
+  function noiseLayer(type, freq, Q) {
+    const s = ctx.createBufferSource(); s.buffer = noise; s.loop = true;
+    const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = Q;
+    const g = ctx.createGain(); g.gain.value = 0;
+    s.connect(f).connect(g).connect(master); s.start(0);
+    return { f, gain: g.gain };
+  }
+  const windBed = noiseLayer('bandpass', 320, 1.2);
+  const breath = noiseLayer('bandpass', 1100, 0.7);
+
+  function tone(semi, t, amp, dur, panX, kind) {
+    const o = ctx.createOscillator(), o2 = ctx.createOscillator();
+    o.type = 'sine'; o2.type = 'triangle';
+    o.frequency.value = hz(semi); o2.frequency.value = hz(semi) * 2.002;
+    const g = ctx.createGain(), g2 = ctx.createGain(); g2.gain.value = kind === 'seed' ? 0.25 : 0.1;
+    const pan = ctx.createStereoPanner(); pan.pan.value = panX * 1.6 - 0.8;
+    o.connect(g); o2.connect(g2).connect(g); g.connect(pan).connect(master);
+    const atk = kind === 'grow' ? 1.8 : 0.015;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(amp, t + atk);
+    g.gain.setTargetAtTime(0, t + atk, dur / 4);
+    o.start(t); o2.start(t); o.stop(t + atk + dur + 0.5); o2.stop(t + atk + dur + 0.5);
+  }
+  return { ctx, master, windBed, breath, tone, nextWind: 0 };
+}
+
+// ---------- 世界 ----------
+const canvas = $('#field'), g = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height, GROUND = H * 0.86;
+const world = { plants: [], seeds: [], sprouts: [], t: 0 };
+function makePlant(x, scale = 1, mature = true) {
+  const p = { x, scale, headY: GROUND - 210 * scale, r: 34 * scale, seeds: [], grow: mature ? 1 : 0, born: world.t };
+  const n = Math.round(48 * scale) + 12;
+  for (let i = 0; i < n; i++) p.seeds.push({ a: (i / n) * 6.283 + Math.random() * 0.08, len: 0.85 + Math.random() * 0.3 });
+  return p;
+}
+function reset() { world.plants = [makePlant(W * 0.32)]; world.seeds = []; world.sprouts = []; }
+reset();
+
+let blow = 0, holding = false, micLevel = 0;
+function release(plant, strength, t) {
+  if (!plant.seeds.length || plant.grow < 1) return 0;
+  const k = Math.min(plant.seeds.length, Math.max(1, Math.round(strength * strength * 10 + Math.random())));
+  const dir = P.wind >= 0 ? 1 : -1;
+  for (let i = 0; i < k; i++) {
+    // 迎风面的种子先飞
+    plant.seeds.sort((a, b) => Math.cos(a.a) * dir - Math.cos(b.a) * dir);
+    const s = plant.seeds.shift();
+    const hx = plant.x + Math.cos(s.a) * plant.r * s.len, hy = plant.headY + Math.sin(s.a) * plant.r * s.len;
+    world.seeds.push({ x: hx, y: hy, vx: dir * (60 + 160 * strength) * (0.7 + Math.random() * 0.6), vy: -(20 + 70 * strength) * Math.random(), ph: Math.random() * 6.28, born: t, semi: PENTA[Math.floor(Math.random() * PENTA.length)] });
+    if (A) A.tone(world.seeds.at(-1).semi + 12, A.ctx.currentTime + i * 0.03, 0.06 * (0.5 + strength), 0.9 + Math.random(), hx / W, 'seed');
+  }
+  return k;
+}
+
+function step(dt) {
+  world.t += dt;
+  const wind = P.wind * 90;
+  // 吹：从所有成熟的植株里放种子，快慢跟着气流
+  if (blow > 0.05) {
+    for (const p of world.plants) if (Math.random() < blow * dt * 6) release(p, blow, world.t);
+  }
+  for (const s of world.seeds) {
+    s.vx += (wind - s.vx) * dt * 0.8 + Math.sin(world.t * 2.1 + s.ph) * 40 * dt;
+    s.vy += (14 - s.vy) * dt * 0.9 + Math.cos(world.t * 1.7 + s.ph) * 30 * dt;
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    if (s.y >= GROUND) {
+      s.dead = true;
+      if (s.x > 20 && s.x < W - 20 && world.sprouts.length + world.plants.length < 9) {
+        world.sprouts.push({ x: s.x, t0: world.t, dur: 8 + Math.random() * 5, semi: s.semi });
+        if (A) A.tone(s.semi, A.ctx.currentTime, 0.05, 0.5, s.x / W, 'land');
+      }
+    }
+    if (s.x < -40 || s.x > W + 40) s.dead = true;
+  }
+  world.seeds = world.seeds.filter(s => !s.dead);
+  for (const sp of world.sprouts) {
+    sp.grow = Math.min(1, (world.t - sp.t0) / sp.dur);
+    if (sp.grow >= 1 && !sp.done) {
+      sp.done = true;
+      const scale = 0.55 + Math.random() * 0.35;
+      world.plants.push(makePlant(sp.x, scale));
+      if (A) { A.tone(sp.semi, A.ctx.currentTime, 0.045, 3, sp.x / W, 'grow'); A.tone(sp.semi + 7, A.ctx.currentTime + 0.4, 0.03, 3, sp.x / W, 'grow'); }
+      log(`一株新的长成了（第 ${world.plants.length} 株）`);
+    }
+  }
+  world.sprouts = world.sprouts.filter(s => !s.done);
+  // 吹光了的老植株慢慢退场
+  world.plants = world.plants.filter(p => p.seeds.length > 0 || world.t - p.born < 40 || world.plants.length <= 1);
+
+  if (A) {
+    const t = A.ctx.currentTime;
+    A.breath.gain.setTargetAtTime(0.09 * blow, t, 0.08);
+    A.breath.f.frequency.setTargetAtTime(700 + 900 * blow, t, 0.1);
+    if (t > A.nextWind) { A.windBed.gain.setTargetAtTime(0.04 * Math.abs(P.wind) * (0.5 + Math.random()), t, 1.5); A.windBed.f.frequency.setTargetAtTime(250 + Math.random() * 250, t, 1.5); A.nextWind = t + 2 + Math.random() * 3; }
+    A.master.gain.setTargetAtTime(P.volume, t, 0.1);
+  }
+}
+
+function drawPlant(p) {
+  const gr = p.grow;
+  g.strokeStyle = '#6f9a6a'; g.lineWidth = 2.2 * p.scale;
+  g.beginPath(); g.moveTo(p.x, GROUND); g.quadraticCurveTo(p.x + 8 * p.scale, GROUND - 100 * p.scale * gr, p.x, p.headY + (1 - gr) * 210 * p.scale); g.stroke();
+  const hy = p.headY;
+  g.fillStyle = '#c9d6b0'; g.beginPath(); g.arc(p.x, hy, 4 * p.scale, 0, 6.283); g.fill();
+  g.strokeStyle = 'rgba(235,240,230,0.75)'; g.lineWidth = 1;
+  for (const s of p.seeds) {
+    const ex = p.x + Math.cos(s.a) * p.r * s.len, ey = hy + Math.sin(s.a) * p.r * s.len;
+    g.beginPath(); g.moveTo(p.x, hy); g.lineTo(ex, ey); g.stroke();
+    g.beginPath(); g.arc(ex, ey, 1.6 * p.scale, 0, 6.283); g.stroke();
+  }
+}
+function drawSeed(s) {
+  const ang = Math.atan2(s.vy, s.vx) + Math.PI / 2 + Math.sin(world.t * 3 + s.ph) * 0.3;
+  g.strokeStyle = 'rgba(240,244,236,0.9)'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(s.x, s.y); g.lineTo(s.x - Math.cos(ang) * 12, s.y - Math.sin(ang) * 12); g.stroke();
+  for (let i = 0; i < 5; i++) { const a = ang + (i - 2) * 0.35 + Math.PI; g.beginPath(); g.moveTo(s.x, s.y); g.lineTo(s.x + Math.cos(a) * 7, s.y + Math.sin(a) * 7); g.stroke(); }
+}
+function drawSprout(sp) {
+  const h = 60 * sp.grow;
+  g.strokeStyle = '#7fb27a'; g.lineWidth = 1.6;
+  g.beginPath(); g.moveTo(sp.x, GROUND); g.quadraticCurveTo(sp.x + 6, GROUND - h * 0.6, sp.x, GROUND - h); g.stroke();
+  if (sp.grow > 0.3) { g.beginPath(); g.ellipse(sp.x - 6, GROUND - h * 0.5, 7 * sp.grow, 3 * sp.grow, -0.5, 0, 6.283); g.stroke(); }
+}
+let last = 0, raf = null, running = false;
+function frame(ts) {
+  if (!running) return;
+  const dt = Math.min(0.05, (ts - last) / 1000 || 0.016); last = ts;
+  blow = Math.max(holding ? 0.7 : 0, micLevel);
+  $('#blowMeter').style.width = (blow * 100) + '%';
+  step(dt);
+  g.fillStyle = '#08111b'; g.fillRect(0, 0, W, H);
+  g.fillStyle = '#0f1a14'; g.fillRect(0, GROUND, W, H - GROUND);
+  for (const sp of world.sprouts) drawSprout(sp);
+  for (const p of world.plants) drawPlant(p);
+  for (const s of world.seeds) drawSeed(s);
+  raf = requestAnimationFrame(frame);
+}
+
+// ---------- 交互 ----------
+async function start() {
+  if (running) return;
+  A = buildAudio(); await A.ctx.resume();
+  running = true; last = performance.now(); raf = requestAnimationFrame(frame);
+  $('#toggle').textContent = '停止'; log('开始。按住"吹"，或开麦克风对着吹。');
+}
+function stop() {
+  running = false; cancelAnimationFrame(raf);
+  if (A) { A.master.gain.setTargetAtTime(0, A.ctx.currentTime, 0.3); const c = A.ctx; setTimeout(() => c.close(), 1200); A = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; micLevel = 0; $('#mic').textContent = '开麦克风'; }
+  $('#toggle').textContent = '开始'; log('停止');
+}
+$('#toggle').addEventListener('click', () => running ? stop() : start());
+$('#reset').addEventListener('click', () => { reset(); log('重来'); });
+const blowBtn = $('#blow');
+blowBtn.addEventListener('pointerdown', e => { holding = true; blowBtn.setPointerCapture(e.pointerId); if (!running) start(); });
+blowBtn.addEventListener('pointerup', () => holding = false);
+blowBtn.addEventListener('pointercancel', () => holding = false);
+document.addEventListener('pointerup', () => holding = false);
+window.addEventListener('blur', () => holding = false);
+document.addEventListener('keydown', e => { if (e.code === 'Space' && e.target.tagName !== 'INPUT') { e.preventDefault(); holding = true; if (!running) start(); } });
+document.addEventListener('keyup', e => { if (e.code === 'Space') holding = false; });
+canvas.addEventListener('pointerdown', () => { if (!running) start(); for (const p of world.plants) release(p, 0.8, world.t); });
+
+let micStream = null, micAnalyser = null, micBuf = null;
+$('#mic').addEventListener('click', async () => {
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; micLevel = 0; $('#mic').textContent = '开麦克风'; return; }
+  if (!running) await start();
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const src = A.ctx.createMediaStreamSource(micStream);
+    const hp = A.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 600;   // 吹气是宽带的高频噪声，说话大多在下面
+    micAnalyser = A.ctx.createAnalyser(); micAnalyser.fftSize = 512; micBuf = new Float32Array(512);
+    src.connect(hp).connect(micAnalyser);
+    $('#mic').textContent = '关麦克风'; log('麦克风已开，对着吹');
+    (function poll() {
+      if (!micStream) return;
+      micAnalyser.getFloatTimeDomainData(micBuf);
+      let sum = 0; for (let i = 0; i < micBuf.length; i++) sum += micBuf[i] * micBuf[i];
+      const rms = Math.sqrt(sum / micBuf.length);
+      const target = Math.max(0, Math.min(1, (rms - 0.01) / (0.2 * (1.05 - P.sensitivity))));
+      micLevel += (target - micLevel) * 0.25;
+      requestAnimationFrame(poll);
+    })();
+  } catch (e) { log('麦克风不可用：' + e.message + '。按住"吹"也一样。'); }
+});
+window.Dandelion = { world, P, release, step, start, stop };
+</script>
+</body>
+</html>
