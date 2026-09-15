@@ -23,6 +23,7 @@
 <main>
   <section>
     <h2>A · 真实录音</h2>
+    <div class="export" style="margin-bottom:10px"><label>对照目标</label><select id="target"><option value="surf">海浪（文献）</option><option value="none">无（仙女棒等）</option></select></div>
     <div class="drop" id="dropA">拖一个录音或视频到这里，或点击选择<input type="file" id="fileA" accept="audio/*,video/*" hidden></div>
     <canvas class="bands" id="bandsA" width="900" height="440"></canvas>
     <div class="legend"><i style="background:#58c4ff"></i>这个文件 <i style="background:#8aa0b6"></i>文献目标</div>
@@ -31,6 +32,7 @@
   <section>
     <h2>B · 引擎输出</h2>
     <div class="export">
+      <select id="engine"><option value="ocean">海浪</option><option value="raw">仙女棒 · 原味</option><option value="electro">仙女棒 · 电子</option><option value="drum">仙女棒 · 鼓机</option></select>
       <select id="preset"><option value="afternoon">午后沙滩</option><option value="dawn">清晨平静</option><option value="brighton">卵石滩</option><option value="storm">礁石风暴</option><option value="far">远处的海</option></select>
       <input type="number" id="seconds" min="10" max="180" value="40"><span>秒</span>
       <button class="primary" id="render">渲染并分析</button>
@@ -42,6 +44,7 @@
   </section>
 </main>
 <script src="ocean.js"></script>
+<script src="sparkler.js"></script>
 <script src="analysis.js"></script>
 <script>
 const $ = s => document.querySelector(s);
@@ -67,10 +70,12 @@ function drawBands(canvas, series) {
   BANDS.forEach((fc, i) => g.fillText(fc >= 1000 ? (fc / 1000) + 'k' : fc, pad + i * slot + slot / 2, H - 14));
 }
 
+const target = () => $('#target').value === 'surf' ? TARGET_SURF : null;
+const names = { A: '', B: '' };
 function show(which, r, name) {
-  results[which] = r;
-  $('#report' + which).textContent = report(r, name);
-  const series = [{ color: '#8aa0b6', data: TARGET_SURF }];
+  results[which] = r; names[which] = name;
+  $('#report' + which).textContent = report(r, name, target());
+  const series = target() ? [{ color: '#8aa0b6', data: TARGET_SURF }] : [];
   if (which === 'A') series.unshift({ color: '#58c4ff', data: r.bandsDb });
   else { if (results.A) series.unshift({ color: '#58c4ff', data: results.A.bandsDb }); series.unshift({ color: '#ffd166', data: r.bandsDb }); }
   drawBands($('#bands' + which), series);
@@ -101,13 +106,21 @@ wireDrop('A'); wireDrop('B');
 $('#render').addEventListener('click', async () => {
   const btn = $('#render'); btn.disabled = true; btn.textContent = '渲染中…';
   try {
-    const preset = $('#preset').value, seconds = Math.min(180, Math.max(10, Number($('#seconds').value) || 40));
-    const p = { swell: .6, period: 9, breakForce: .6, wash: .6, distance: .25, wind: .25, gulls: 0, material: 'sand', seed: 'analyze', ...window.Wavemaker.PRESETS[preset], gulls: 0 };
-    const buf = await window.Wavemaker.renderOffline(p, seconds);
-    show('B', analyze(buf), `引擎 · ${preset}`);
+    const engine = $('#engine').value, preset = $('#preset').value, seconds = Math.min(180, Math.max(10, Number($('#seconds').value) || 40));
+    let buf, name;
+    if (engine === 'ocean') {
+      const p = { swell: .6, period: 9, breakForce: .6, wash: .6, distance: .25, wind: .25, gulls: 0, material: 'sand', seed: 'analyze', ...window.Wavemaker.PRESETS[preset], gulls: 0 };
+      buf = await window.Wavemaker.renderOffline(p, seconds); name = `海浪 · ${preset}`;
+    } else {
+      const p = { mode: engine, density: .6, burstiness: .5, force: .6, depth: .4, burn: Math.max(8, seconds - 4), seed: 'analyze', bpm: 140, subdiv: 16 };
+      buf = await window.Sparkler.renderOffline(p, 1); name = `仙女棒 · ${engine}`;
+    }
+    show('B', analyze(buf), name);
   } catch (e) { $('#reportB').textContent = '失败：' + e.message; }
   finally { btn.disabled = false; btn.textContent = '渲染并分析'; }
 });
+$('#target').addEventListener('change', () => { for (const w of ['A', 'B']) if (results[w]) show(w, results[w], names[w]); });
+$('#engine').addEventListener('change', e => { $('#preset').style.display = e.target.value === 'ocean' ? '' : 'none'; });
 window.AnalyzePage = { show, results };
 </script>
 </body>

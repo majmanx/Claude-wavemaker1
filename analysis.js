@@ -111,15 +111,15 @@
     };
   }
 
-  function report(r, name = '') {
+  function report(r, name = '', target = TARGET_SURF) {
     if (!r) return '（太短，无法分析）';
     const lines = [];
     lines.push(`${name} ${r.seconds.toFixed(1)} s · ${r.sampleRate} Hz · ${r.channels} ch · RMS ${r.rmsDb.toFixed(1)} dBFS`);
     lines.push('倍频程（相对 500 Hz，dB）：');
-    for (const fc of BANDS) lines.push(`  ${String(fc).padStart(5)} Hz  ${r.bandsDb[fc].toFixed(1).padStart(6)}   目标 ${String(TARGET_SURF[fc]).padStart(4)}   差 ${(r.bandsDb[fc] - TARGET_SURF[fc]).toFixed(1).padStart(6)}`);
-    lines.push(`频谱斜率 ${r.slope.toFixed(1)} dB/倍频程（目标约 -5 到 -6）· 质心 ${r.centroid.toFixed(0)} Hz`);
-    lines.push(`浪的周期 ${r.wavePeriod.toFixed(1)} s（自相关 ${r.periodStrength.toFixed(2)}）· 峰均比 ${r.crest.toFixed(2)}`);
-    lines.push(`拍岸时亮度 ${r.breakCentroid.toFixed(0)} Hz · 间歇时亮度 ${r.troughCentroid.toFixed(0)} Hz`);
+    for (const fc of BANDS) lines.push(`  ${String(fc).padStart(5)} Hz  ${r.bandsDb[fc].toFixed(1).padStart(6)}` + (target ? `   目标 ${String(target[fc]).padStart(4)}   差 ${(r.bandsDb[fc] - target[fc]).toFixed(1).padStart(6)}` : ''));
+    lines.push(`频谱斜率 ${r.slope.toFixed(1)} dB/倍频程${target ? '（海浪目标约 -5 到 -6）' : ''} · 质心 ${r.centroid.toFixed(0)} Hz`);
+    lines.push(`包络周期 ${r.wavePeriod.toFixed(1)} s（自相关 ${r.periodStrength.toFixed(2)}）· 峰均比 ${r.crest.toFixed(2)}`);
+    lines.push(`最响时亮度 ${r.breakCentroid.toFixed(0)} Hz · 最轻时亮度 ${r.troughCentroid.toFixed(0)} Hz`);
     return lines.join('\n');
   }
 
